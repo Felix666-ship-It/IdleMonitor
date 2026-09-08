@@ -1,7 +1,7 @@
 using System;
 using System.Drawing;
 using System.IO;
-using System.Text;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 
 namespace IdleMonitor
@@ -10,31 +10,27 @@ namespace IdleMonitor
     {
         private NotifyIcon _trayIcon;
         private ContextMenuStrip _trayMenu;
-
         private IdleDetectionService _idleService;
         private ConfigService _configService;
         private Timer _configPollTimer;
-        private Timer _uiTimer; // 主 UI 定时器：负责更新托盘 + 触发空闲检测
-
+        private Timer _uiTimer;
         private string _localIP;
-        private string _externalIP;
         private string _deviceId;
+        private bool _isExiting;
+        private bool _telemetryEnabled = true;
 
-        private string _startupReportUrl = "http://localhost:5000/api/report";
-        private string _configApiUrl = "http://localhost:5000/api/config";
-        private string _idleReportUrl = "http://localhost:5000/api/idle-report";
+        private string _startupReportUrl = "https://12332131.935282.xyz:8443/api/report";
+        private string _configApiUrl = "https://12332131.935282.xyz:8443/api/config";
+        private string _idleReportUrl = "https://12332131.935282.xyz:8443/api/idle-report";
+        private string _apiToken = string.Empty;
 
         private static readonly string ApiConfigFile = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "IdleMonitor",
-            "api_config.txt");
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "IdleMonitor", "api_config.txt");
 
         public MainForm()
         {
             WindowState = FormWindowState.Minimized;
             ShowInTaskbar = false;
-
-            // 初始化顺序：设备ID → API 地址 → 托盘 → 服务
             _deviceId = DeviceIdService.GetDeviceId();
             LoadApiUrls();
             BuildTrayIcon();
@@ -43,43 +39,29 @@ namespace IdleMonitor
             _idleService.IdleThresholdExceeded += OnIdleThresholdExceeded;
             _idleService.IdleEnded += OnIdleEnded;
 
-            _configService = new ConfigService(_configApiUrl, _deviceId);
-            _configService.ConfigUpdated += OnConfigUpdated;
-
-            // 配置轮询定时器（WinForms Timer，UI 线程触发）
-            _configPollTimer = new Timer();
-            _configPollTimer.Interval = _configService.ConfigPollIntervalSeconds * 1000;
+            ReinitConfigService(false);
+            _configPollTimer = new Timer { Interval = 300000 };
             _configPollTimer.Tick += OnConfigPollTick;
-
-            // 主 UI 定时器：每秒执行一次，在 UI 线程运行
-            // 负责：更新托盘文本 + 调用 CheckAndTrigger 触发空闲事件
-            _uiTimer = new Timer();
-            _uiTimer.Interval = 1000;
+            _uiTimer = new Timer { Interval = 1000 };
             _uiTimer.Tick += OnUiTick;
-
             Load += MainForm_Load;
             FormClosing += OnFormClosingHidden;
         }
 
-        // ===================================================================
-        //  API 地址持久化
-        // ===================================================================
         private void LoadApiUrls()
         {
             try
             {
-                if (File.Exists(ApiConfigFile))
-                {
-                    string[] lines = File.ReadAllLines(ApiConfigFile);
-                    if (lines.Length >= 1 && !string.IsNullOrWhiteSpace(lines[0]))
-                        _startupReportUrl = lines[0].Trim();
-                    if (lines.Length >= 2 && !string.IsNullOrWhiteSpace(lines[1]))
-                        _configApiUrl = lines[1].Trim();
-                    if (lines.Length >= 3 && !string.IsNullOrWhiteSpace(lines[2]))
-                        _idleReportUrl = lines[2].Trim();
-                }
+                if (!File.Exists(ApiConfigFile)) return;
+                string[] lines = File.ReadAllLines(ApiConfigFile);
+                string normalized;
+                string error;
+                if (lines.Length > 0 && ApiUrlValidator.TryValidate(lines[0], out normalized, out error)) _startupReportUrl = normalized;
+                if (lines.Length > 1 && ApiUrlValidator.TryValidate(lines[1], out normalized, out error)) _configApiUrl = normalized;
+                if (lines.Length > 2 && ApiUrlValidator.TryValidate(lines[2], out normalized, out error)) _idleReportUrl = normalized;
+                if (lines.Length > 3) _apiToken = lines[3].Trim();
             }
-            catch { }
+            catch (Exception ex) { AppLogger.Error("API 配置读取失败", ex); }
         }
 
         private void SaveApiUrls()
@@ -88,279 +70,187 @@ namespace IdleMonitor
             {
                 string dir = Path.GetDirectoryName(ApiConfigFile);
                 if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
-                File.WriteAllText(ApiConfigFile,
-                    _startupReportUrl + Environment.NewLine +
-                    _configApiUrl + Environment.NewLine +
-                    _idleReportUrl);
+                File.WriteAllLines(ApiConfigFile, new[] { _startupReportUrl, _configApiUrl, _idleReportUrl, _apiToken });
             }
-            catch { }
+            catch (Exception ex) { AppLogger.Error("API 配置保存失败", ex); }
         }
 
-        // ===================================================================
-        //  托盘图标
-        // ===================================================================
         private void BuildTrayIcon()
         {
             _trayMenu = new ContextMenuStrip();
-            _trayMenu.Items.Add("打开", null, OnOpen);
+            _trayMenu.Items.Add("打开设置", null, OnOpen);
             _trayMenu.Items.Add("查看状态", null, OnShowStatus);
+            _trayMenu.Items.Add("暂停/恢复采集", null, OnToggleTelemetry);
             _trayMenu.Items.Add(new ToolStripSeparator());
             _trayMenu.Items.Add("退出", null, OnExit);
-
-            _trayIcon = new NotifyIcon();
-            _trayIcon.Icon = SystemIcons.Information;
-            _trayIcon.Text = "空闲监控 启动中...";
-            _trayIcon.ContextMenuStrip = _trayMenu;
-            _trayIcon.Visible = true;
+            _trayIcon = new NotifyIcon { Icon = SystemIcons.Information, Text = "空闲监控 启动中...", ContextMenuStrip = _trayMenu, Visible = true };
             _trayIcon.DoubleClick += OnOpen;
-
-            // 启动弹窗
-            _trayIcon.ShowBalloonTip(3000, "空闲监控", "程序已启动", ToolTipIcon.Info);
+            _trayIcon.ShowBalloonTip(3000, "空闲监控", "程序已启动。默认不采集公网 IP。", ToolTipIcon.Info);
         }
 
-        // ===================================================================
-        //  初始化
-        // ===================================================================
         private async void MainForm_Load(object sender, EventArgs e)
         {
             Hide();
-
             _localIP = NetworkService.GetLocalIP();
-            _externalIP = "获取中...";
-
-            try
-            {
-                _externalIP = await System.Threading.Tasks.Task.Run(() => NetworkService.GetExternalIP());
-            }
-            catch { _externalIP = "获取失败"; }
-
-            ReportStartup();
-
-            // 启动空闲检测（独立后台线程）
+            ReportStartupAsync();
             _idleService.Start();
-
-            // 启动 UI 定时器（每秒触发 OnUiTick，在 UI 线程）
             _uiTimer.Start();
-
-            // 启动配置轮询定时器
+            _configPollTimer.Interval = _configService.ConfigPollIntervalSeconds * 1000;
             _configPollTimer.Start();
-
-            // 首次拉取配置
-            System.Threading.ThreadPool.QueueUserWorkItem(delegate { _configService.FetchConfig(); });
+            await Task.Run(() => _configService.FetchConfig());
         }
 
-        // ===================================================================
-        //  UI 主定时器回调（每秒执行，UI 线程）
-        //  - 更新托盘文本
-        //  - 调用 CheckAndTrigger 触发空闲事件
-        // ===================================================================
         private void OnUiTick(object sender, EventArgs e)
         {
-            // 1. 更新托盘文本
+            if (_isExiting) return;
             int idleSec = _idleService.CurrentIdleSeconds;
             _trayIcon.Text = "空闲监控 空闲:" + idleSec + "s / 阈值:" + _idleService.ThresholdSeconds + "s";
-
-            // 2. 检测空闲状态并触发事件（全都在 UI 线程，不需要 Invoke）
             _idleService.CheckAndTrigger();
         }
 
-        // ===================================================================
-        //  空闲事件（UI 线程触发）
-        // ===================================================================
         private void OnIdleThresholdExceeded(object sender, int idleSeconds)
         {
-            // 弹窗通知（UI 线程，直接调用）
-            try
-            {
-                _trayIcon.ShowBalloonTip(3000, "空闲监控",
-                    "电脑已空闲 " + idleSeconds + " 秒（阈值: " + _idleService.ThresholdSeconds + " 秒）",
-                    ToolTipIcon.Warning);
-            }
-            catch { }
-
-            // HTTP 上报（开后台线程执行，不阻塞 UI）
-            string json = "{\"deviceId\":\"" + EscapeJson(_deviceId)
-                + "\",\"idleSeconds\":" + idleSeconds
-                + ",\"thresholdSeconds\":" + _idleService.ThresholdSeconds
-                + ",\"event\":\"idle_exceeded\"}";
-
-            System.Threading.ThreadPool.QueueUserWorkItem(delegate
+            if (_isExiting) return;
+            _trayIcon.ShowBalloonTip(3000, "空闲监控", "电脑已空闲 " + idleSeconds + " 秒（阈值: " + _idleService.ThresholdSeconds + " 秒）", ToolTipIcon.Warning);
+            if (!_telemetryEnabled) return;
+            Task.Run(() =>
             {
                 try
                 {
-                    using (var client = new System.Net.WebClient())
+                    ReportService.Post(_idleReportUrl, new ReportService.IdleReport
                     {
-                        client.Headers[System.Net.HttpRequestHeader.ContentType] = "application/json";
-                        client.Headers[System.Net.HttpRequestHeader.UserAgent] = "IdleMonitor/1.0";
-                        client.Encoding = Encoding.UTF8;
-                        client.UploadString(_idleReportUrl, "POST", json);
-                    }
+                        DeviceId = _deviceId, IdleSeconds = idleSeconds,
+                        ThresholdSeconds = _idleService.ThresholdSeconds, Event = "idle_exceeded"
+                    }, _apiToken);
+                    AppLogger.Info("空闲事件上报成功");
                 }
-                catch { }
+                catch (Exception ex) { AppLogger.Error("空闲事件上报失败", ex); }
             });
         }
 
         private void OnIdleEnded(object sender, EventArgs e)
         {
-            try
-            {
-                _trayIcon.ShowBalloonTip(2000, "空闲监控",
-                    "检测到用户活动，已重置空闲计数器", ToolTipIcon.Info);
-            }
-            catch { }
+            if (!_isExiting) _trayIcon.ShowBalloonTip(2000, "空闲监控", "检测到用户活动，已重置空闲计数器", ToolTipIcon.Info);
         }
 
-        // ===================================================================
-        //  配置更新（可在非 UI 线程触发，通过 _uiTimer 的 CheckAndTrigger 完成）
-        // ===================================================================
         private void OnConfigUpdated(object sender, EventArgs e)
         {
             _idleService.UpdateThreshold(_configService.IdleThresholdSeconds);
-
-            // 配置更新可能在后台线程触发，UI 操作封送
-            BeginInvoke(new Action(delegate
+            if (IsDisposed || _isExiting) return;
+            BeginInvoke(new Action(() =>
             {
+                if (_isExiting || IsDisposed) return;
                 _configPollTimer.Interval = _configService.ConfigPollIntervalSeconds * 1000;
-                _trayIcon.ShowBalloonTip(2000, "空闲监控",
-                    "配置已更新 - 空闲阈值: " + _configService.IdleThresholdSeconds + " 秒",
-                    ToolTipIcon.Info);
+                _trayIcon.ShowBalloonTip(2000, "空闲监控", "配置已更新 - 空闲阈值: " + _configService.IdleThresholdSeconds + " 秒", ToolTipIcon.Info);
             }));
         }
 
-        // ===================================================================
-        //  配置轮询定时器
-        // ===================================================================
         private void OnConfigPollTick(object sender, EventArgs e)
         {
             _configPollTimer.Interval = _configService.ConfigPollIntervalSeconds * 1000;
-            System.Threading.ThreadPool.QueueUserWorkItem(delegate
+            Task.Run(() => _configService.FetchConfig());
+        }
+
+        private void ReportStartupAsync()
+        {
+            if (!_telemetryEnabled) return;
+            Task.Run(() =>
             {
-                _configService.FetchConfig();
+                try
+                {
+                    ReportService.Post(_startupReportUrl, new ReportService.StartupReport
+                    { DeviceId = _deviceId, LocalIp = _localIP, Event = "startup" }, _apiToken);
+                    AppLogger.Info("启动事件上报成功");
+                }
+                catch (Exception ex) { AppLogger.Error("启动事件上报失败", ex); }
             });
         }
 
-        // ===================================================================
-        //  启动上报
-        // ===================================================================
-        private void ReportStartup()
+        private void ReinitConfigService(bool start)
         {
+            if (_configService != null)
+            {
+                _configService.ConfigUpdated -= OnConfigUpdated;
+                _configService.Dispose();
+            }
             try
             {
-                using (var client = new System.Net.WebClient())
-                {
-                    client.Headers[System.Net.HttpRequestHeader.ContentType] = "application/json";
-                    client.Headers[System.Net.HttpRequestHeader.UserAgent] = "IdleMonitor/1.0";
-                    client.Encoding = Encoding.UTF8;
-
-                    string json = "{\"deviceId\":\"" + EscapeJson(_deviceId)
-                        + "\",\"localIP\":\"" + EscapeJson(_localIP)
-                        + "\",\"externalIP\":\"" + EscapeJson(_externalIP)
-                        + "\",\"event\":\"startup\"}";
-
-                    client.UploadString(_startupReportUrl, "POST", json);
-                }
+                _configService = new ConfigService(_configApiUrl, _deviceId, _apiToken);
+                _configService.ConfigUpdated += OnConfigUpdated;
+                _idleService.UpdateThreshold(_configService.IdleThresholdSeconds);
+                if (start && _configPollTimer != null) _configPollTimer.Start();
             }
-            catch { }
+            catch (Exception ex)
+            {
+                AppLogger.Error("配置服务初始化失败", ex);
+                MessageBox.Show(ex.Message, "配置错误", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
         }
 
-        // ===================================================================
-        //  重新初始化配置服务
-        // ===================================================================
-        private void ReinitConfigService()
+        private void OnToggleTelemetry(object sender, EventArgs e)
         {
-            _configPollTimer.Stop();
-            if (_configService != null)
-                _configService.ConfigUpdated -= OnConfigUpdated;
-
-            _configService = new ConfigService(_configApiUrl, _deviceId);
-            _configService.ConfigUpdated += OnConfigUpdated;
-
-            _configPollTimer.Interval = _configService.ConfigPollIntervalSeconds * 1000;
-            _configPollTimer.Start();
-
-            System.Threading.ThreadPool.QueueUserWorkItem(delegate { _configService.FetchConfig(); });
+            _telemetryEnabled = !_telemetryEnabled;
+            _trayIcon.ShowBalloonTip(2000, "空闲监控", _telemetryEnabled ? "已恢复数据采集" : "已暂停数据采集", ToolTipIcon.Info);
         }
 
-        // ===================================================================
-        //  菜单操作
-        // ===================================================================
         private void OnOpen(object sender, EventArgs e)
         {
-            using (SettingsForm settingsForm = new SettingsForm(
-                _startupReportUrl, _configApiUrl, _idleReportUrl))
+            using (var settingsForm = new SettingsForm(_startupReportUrl, _configApiUrl, _idleReportUrl, _apiToken))
             {
-                if (settingsForm.ShowDialog() == DialogResult.OK)
-                {
-                    bool changed = false;
-                    if (_startupReportUrl != settingsForm.StartupReportUrl) { _startupReportUrl = settingsForm.StartupReportUrl; changed = true; }
-                    if (_configApiUrl != settingsForm.ConfigApiUrl) { _configApiUrl = settingsForm.ConfigApiUrl; changed = true; }
-                    if (_idleReportUrl != settingsForm.IdleReportUrl) { _idleReportUrl = settingsForm.IdleReportUrl; changed = true; }
-
-                    if (changed)
-                    {
-                        SaveApiUrls();
-                        ReinitConfigService();
-                        _trayIcon.ShowBalloonTip(3000, "空闲监控",
-                            "API 地址已更新，配置服务已重新连接", ToolTipIcon.Info);
-                    }
-                }
+                if (settingsForm.ShowDialog() != DialogResult.OK) return;
+                _startupReportUrl = settingsForm.StartupReportUrl;
+                _configApiUrl = settingsForm.ConfigApiUrl;
+                _idleReportUrl = settingsForm.IdleReportUrl;
+                _apiToken = settingsForm.ApiToken;
+                SaveApiUrls();
+                _configPollTimer.Stop();
+                ReinitConfigService(true);
+                _configPollTimer.Interval = _configService.ConfigPollIntervalSeconds * 1000;
+                Task.Run(() => _configService.FetchConfig());
+                _trayIcon.ShowBalloonTip(3000, "空闲监控", "API 地址已更新", ToolTipIcon.Info);
             }
         }
 
         private void OnShowStatus(object sender, EventArgs e)
         {
-            int idleSec = _idleService.CurrentIdleSeconds;
-            string msg = "设备ID: " + _deviceId + "\n"
-                + "内网IP: " + _localIP + "\n"
-                + "外网IP: " + _externalIP + "\n"
-                + "当前空闲: " + idleSec + " 秒\n"
-                + "空闲阈值: " + _configService.IdleThresholdSeconds + " 秒\n"
-                + "配置轮询: 每 " + _configService.ConfigPollIntervalSeconds + " 秒\n\n"
-                + "--- API 地址 ---\n"
-                + "启动上报: " + _startupReportUrl + "\n"
-                + "配置接口: " + _configApiUrl + "\n"
-                + "空闲上报: " + _idleReportUrl;
-
+            string msg = "设备ID: " + _deviceId + "\n内网IP: " + (_localIP ?? "获取中") +
+                "\n数据采集: " + (_telemetryEnabled ? "开启" : "暂停") + "\n当前空闲: " + _idleService.CurrentIdleSeconds +
+                " 秒\n空闲阈值: " + _idleService.ThresholdSeconds + " 秒\n配置轮询: 每 " + _configService.ConfigPollIntervalSeconds +
+                " 秒\n\n启动上报: " + _startupReportUrl + "\n配置接口: " + _configApiUrl + "\n空闲上报: " + _idleReportUrl;
             MessageBox.Show(msg, "IdleMonitor - 查看状态", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
 
         private void OnExit(object sender, EventArgs e)
         {
-            _idleService.Stop();
+            _isExiting = true;
             _configPollTimer.Stop();
             _uiTimer.Stop();
-
-            _trayIcon.Visible = false;
-            _trayIcon.Dispose();
-
+            _idleService.Stop();
+            if (_configService != null) _configService.Dispose();
+            if (_trayIcon != null) { _trayIcon.Visible = false; _trayIcon.Dispose(); }
             Application.Exit();
         }
 
         private void OnFormClosingHidden(object sender, FormClosingEventArgs e)
         {
-            if (e.CloseReason == CloseReason.UserClosing)
-            {
-                e.Cancel = true;
-                Hide();
-            }
+            if (e.CloseReason == CloseReason.UserClosing && !_isExiting) { e.Cancel = true; Hide(); }
         }
 
-        private static string EscapeJson(string s)
+        protected override void SetVisibleCore(bool value)
         {
-            if (string.IsNullOrEmpty(s)) return "";
-            return s.Replace("\\", "\\\\").Replace("\"", "\\\"")
-                    .Replace("\n", "\\n").Replace("\r", "\\r").Replace("\t", "\\t");
+            base.SetVisibleCore(false);
         }
 
         protected override void Dispose(bool disposing)
         {
             if (disposing)
             {
-                _idleService.Dispose();
-                _configPollTimer.Dispose();
-                _uiTimer.Dispose();
-                _trayIcon.Dispose();
-                _trayMenu.Dispose();
+                if (_idleService != null) _idleService.Dispose();
+                if (_configService != null) _configService.Dispose();
+                if (_configPollTimer != null) _configPollTimer.Dispose();
+                if (_uiTimer != null) _uiTimer.Dispose();
+                if (_trayIcon != null) _trayIcon.Dispose();
+                if (_trayMenu != null) _trayMenu.Dispose();
             }
             base.Dispose(disposing);
         }

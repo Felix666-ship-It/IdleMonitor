@@ -80,6 +80,11 @@ namespace IdleMonitor
         public void Stop()
         {
             _running = false;
+            Thread worker = _workerThread;
+            if (worker != null && worker.IsAlive && worker != Thread.CurrentThread)
+            {
+                worker.Join(3000);
+            }
             _workerThread = null;
         }
 

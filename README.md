@@ -36,6 +36,21 @@ app.ico         ac8f327b53e93269f73c4670e5a4fba95881dd946e52c19aead33280709ca852
 Get-FileHash .\IdleMonitor.exe -Algorithm SHA256
 ```
 
-## 说明
+## 构建
 
-当前仓库提供 Windows 可执行文件和应用图标。请从本仓库的 Release 页面下载程序，避免使用来源不明的副本。
+需要 Windows、Visual Studio 2022（含 .NET Framework 4.8 Developer Pack）或兼容 MSBuild：
+
+```powershell
+msbuild .\src\IdleMonitor\IdleMonitor.csproj /p:Configuration=Release
+```
+
+## 安全与隐私
+
+- 远程 API 地址必须使用 HTTPS；仅允许 localhost 使用 HTTP 进行本地开发。
+- 默认不查询、不上报公网 IP，仅发送设备 ID、局域网 IPv4 和事件数据。
+- 托盘菜单可暂停/恢复数据采集；暂停后不会发送启动或空闲事件。
+- API 地址会在保存前进行格式和协议校验，请勿配置不受信任的服务器。
+- 程序会尝试设置当前用户开机启动；可在注册表 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 删除 `IdleMonitor` 项以关闭。
+- 日志位于 `%LOCALAPPDATA%\IdleMonitor\idlemonitor.log`，不记录完整请求体或凭据。
+
+> 生产部署仍应由服务端增加认证、请求签名、设备注册和访问控制。
