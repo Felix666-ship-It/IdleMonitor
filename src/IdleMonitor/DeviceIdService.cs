@@ -34,7 +34,9 @@ namespace IdleMonitor
                         int end = json.IndexOf('"', start);
                         if (end > start)
                         {
-                            return json.Substring(start, end - start);
+                    string value = json.Substring(start, end - start).Trim();
+                            Guid parsed;
+                            if (Guid.TryParse(value, out parsed)) return parsed.ToString("D").ToLowerInvariant();
                         }
                     }
                 }

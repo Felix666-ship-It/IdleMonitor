@@ -80,9 +80,9 @@ namespace IdleMonitor
                     }
                 }
             }
-            catch
+            catch (Exception ex)
             {
-                // 注册表写入失败不影响程序运行
+                AppLogger.Error("开机启动设置失败", ex);
             }
         }
     }
