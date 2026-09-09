@@ -19,9 +19,9 @@ namespace IdleMonitor
         private bool _isExiting;
         private bool _telemetryEnabled = true;
 
-        private string _startupReportUrl = "https://12332131.935282.xyz:8443/api/report";
-        private string _configApiUrl = "https://12332131.935282.xyz:8443/api/config";
-        private string _idleReportUrl = "https://12332131.935282.xyz:8443/api/idle-report";
+        private string _startupReportUrl = "https://monitor.example.com/api/report";
+        private string _configApiUrl = "https://monitor.example.com/api/config";
+        private string _idleReportUrl = "https://monitor.example.com/api/idle-report";
         private string _apiToken = string.Empty;
 
         private static readonly string ApiConfigFile = Path.Combine(

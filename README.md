@@ -48,20 +48,20 @@ Web 面板使用管理员账号和密码登录，可以查看设备、事件以�
 
 ## 在线服务端示例
 
-本项目测试服务端地址：
+请在实际部署后，将下面的占位地址替换为你自己的 HTTPS 域名：
 
-- 首页：<https://12332131.935282.xyz:8443/>
-- Web 管理面板：<https://12332131.935282.xyz:8443/admin>
-- API 文档：<https://12332131.935282.xyz:8443/api-docs>
-- 接入信息：<https://12332131.935282.xyz:8443/api/info>
-- 健康检查：<https://12332131.935282.xyz:8443/healthz>
+- 首页：`https://monitor.example.com/`
+- Web 管理面板：`https://monitor.example.com/admin`
+- API 文档：`https://monitor.example.com/api-docs`
+- 接入信息：`https://monitor.example.com/api/info`
+- 健康检查：`https://monitor.example.com/healthz`
 
 对应客户端 API：
 
 ```text
-https://12332131.935282.xyz:8443/api/report
-https://12332131.935282.xyz:8443/api/config
-https://12332131.935282.xyz:8443/api/idle-report
+https://monitor.example.com/api/report
+https://monitor.example.com/api/config
+https://monitor.example.com/api/idle-report
 ```
 
 > API Token 和 Web 管理员密码不在 README、网页或 Release 中公开。请从服务端受限配置文件中取得，并通过客户端设置页填写。
