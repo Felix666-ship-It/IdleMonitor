@@ -1,0 +1,22 @@
+[Unit]
+Description=IdleMonitor FastAPI server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=idlemonitor
+Group=idlemonitor
+WorkingDirectory=/opt/idlemonitor-server
+EnvironmentFile=/etc/idlemonitor-server.env
+ExecStart=/opt/idlemonitor-server/.venv/bin/uvicorn app:app --host 127.0.0.1 --port 8080 --proxy-headers
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/idlemonitor-server/data
+
+[Install]
+WantedBy=multi-user.target
